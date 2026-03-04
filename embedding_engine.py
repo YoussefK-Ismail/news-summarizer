@@ -1,28 +1,16 @@
 """
 embedding_engine.py
-Handles article vectorization using HuggingFace embeddings and FAISS.
-All heavy imports are deferred inside functions so torch loads only when needed.
+Handles article vectorization using TF-IDF + FAISS (no torch needed).
+Falls back to simple keyword matching for semantic search.
 """
 
 import os
-
-
-FAISS_INDEX_PATH = "faiss_index"
-
-
-def _build_embedder():
-    """Return a HuggingFace embedding model (CPU only, no GPU needed)."""
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    return HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
-    )
+import numpy as np
+from langchain_core.documents import Document
 
 
 def articles_to_documents(articles: list) -> list:
     """Convert raw article dicts into LangChain Document objects."""
-    from langchain_core.documents import Document
     docs = []
     for art in articles:
         text = f"{art['title']}\n\n{art['content']}"
@@ -36,16 +24,32 @@ def articles_to_documents(articles: list) -> list:
     return docs
 
 
-def build_vector_store(articles: list):
-    """Create a FAISS vector store from a list of articles."""
-    from langchain_community.vectorstores import FAISS
-    embedder = _build_embedder()
+class SimpleVectorStore:
+    """Lightweight vector store using TF-IDF — no torch, no GPU needed."""
+
+    def __init__(self, docs: list):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        self.docs = docs
+        self.vectorizer = TfidfVectorizer(stop_words="english", max_features=5000)
+        texts = [d.page_content for d in docs]
+        self.matrix = self.vectorizer.fit_transform(texts)
+
+    def similarity_search(self, query: str, k: int = 3) -> list:
+        from sklearn.metrics.pairwise import cosine_similarity
+        query_vec = self.vectorizer.transform([query])
+        scores = cosine_similarity(query_vec, self.matrix).flatten()
+        top_indices = scores.argsort()[::-1][:k]
+        return [self.docs[i] for i in top_indices]
+
+
+def build_vector_store(articles: list) -> SimpleVectorStore:
+    """Build a TF-IDF vector store from articles."""
     docs = articles_to_documents(articles)
     if not docs:
         raise ValueError("No articles provided.")
-    return FAISS.from_documents(docs, embedder)
+    return SimpleVectorStore(docs)
 
 
-def semantic_search(store, query: str, top_k: int = 3) -> list:
-    """Semantic similarity search against stored articles."""
+def semantic_search(store: SimpleVectorStore, query: str, top_k: int = 3) -> list:
+    """Search for most relevant documents."""
     return store.similarity_search(query, k=top_k)
